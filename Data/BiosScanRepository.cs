@@ -195,11 +195,11 @@ WHERE
                             : $"Automatyczna próba odczytu wersji BIOS przez BiosVersionBot zakończona wynikiem: {u.ResultValue}.";
 
                         string sql = $@"
-DECLARE @ItemId INT,
-        @OldState NVARCHAR(50),
-        @OldResult NVARCHAR(1000),
-        @OldOperator NVARCHAR(100),
-        @Updated TABLE (ItemId INT NOT NULL);
+DECLARE @ItemId INT;
+DECLARE @OldState NVARCHAR(50);
+DECLARE @OldResult NVARCHAR(1000);
+DECLARE @OldOperator NVARCHAR(100);
+DECLARE @RowsAffected INT;
 
 SELECT TOP (1)
     @ItemId = ITEM_ID,
@@ -212,6 +212,8 @@ WHERE CAMPAIGN_ID = @CampaignId
   AND IS_ACTIVE = 1
 ORDER BY ITEM_ID;
 
+SET @RowsAffected = 0;
+
 IF @ItemId IS NOT NULL
 BEGIN
     UPDATE {FullTable}
@@ -222,11 +224,12 @@ BEGIN
         UPDATED_AT = GETDATE(),
         [{_colLastScan}] = @LastScan,
         CLOSED_AT = CASE WHEN @NewState = @DoneState THEN GETDATE() ELSE CLOSED_AT END
-    OUTPUT INSERTED.ITEM_ID INTO @Updated(ItemId)
     WHERE ITEM_ID = @ItemId
       AND [{_colDescription}] = @TargetState;
 
-    IF EXISTS (SELECT 1 FROM @Updated)
+    SET @RowsAffected = @@ROWCOUNT;
+
+    IF @RowsAffected > 0
     BEGIN
         INSERT INTO {FullHistoryTable} (
             ITEM_ID, EVENT_TYPE, OLD_STATE, NEW_STATE, OLD_RESULT, NEW_RESULT,
@@ -248,16 +251,23 @@ BEGIN
             @Operator,
             GETDATE(),
             @Comment,
-            v.COMPUTER_NAME, v.CURRENT_SAP_COMPANY_CODE, v.CURRENT_SAP_SAT,
-            v.CURRENT_SAP_USER_NAME, v.CURRENT_SAP_DEPARTMENT_NAME, v.CURRENT_SAP_ROOM,
-            v.CURRENT_SAP_UNIT, v.CURRENT_SAP_DEPARTMENT_CODE, v.CURRENT_SAP_MODEL,
-            v.CURRENT_SAP_PRODUCER, v.CURRENT_DC_COMPUTER_NAME
+            v.COMPUTER_NAME,
+            v.CURRENT_SAP_COMPANY_CODE,
+            v.CURRENT_SAP_SAT,
+            v.CURRENT_SAP_USER_NAME,
+            v.CURRENT_SAP_DEPARTMENT_NAME,
+            v.CURRENT_SAP_ROOM,
+            v.CURRENT_SAP_UNIT,
+            v.CURRENT_SAP_DEPARTMENT_CODE,
+            v.CURRENT_SAP_MODEL,
+            v.CURRENT_SAP_PRODUCER,
+            v.CURRENT_DC_COMPUTER_NAME
         FROM {FullItemsView} v
         WHERE v.ITEM_ID = @ItemId;
     END
 END
 
-SELECT COUNT(1) FROM @Updated;";
+SELECT @RowsAffected;";
 
                         using var cmd = new SqlCommand(sql, conn, tx) { CommandTimeout = _commandTimeoutSeconds };
                         cmd.Parameters.AddWithValue("@CampaignId", _campaignId);
