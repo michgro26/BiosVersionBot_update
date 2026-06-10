@@ -1,0 +1,7 @@
+bin/
+obj/
+.vs/
+LOG/
+secureconn.dat
+*.user
+*.suo

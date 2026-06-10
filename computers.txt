@@ -1,0 +1,2 @@
+# wpisz nazwy komputerów, po jednej w linii
+# A0001-OSWIECIM
