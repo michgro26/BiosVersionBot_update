@@ -181,8 +181,10 @@ namespace BiosVersionBot
             }
             else
             {
-                targets = await repo.GetTargetsAsync(cfg.Runner.PERIOD, ct);
-                Console.WriteLine($"[INFO] Rekordy do sprawdzenia: {targets.Count}");
+                targets = await repo.GetTargetsAsync(
+                    cfg.Runner.PERIOD,
+                    cfg.Runner.OFFLINE_RETRY_MINUTES,
+                    ct); Console.WriteLine($"[INFO] Rekordy do sprawdzenia: {targets.Count}");
                 log.Info($"Targets loaded from DB: {targets.Count}");
             }
 
@@ -410,6 +412,7 @@ namespace BiosVersionBot
             public int END_HOUR { get; set; } = 18;
             public int DELAY { get; set; } = 30;
             public int PERIOD { get; set; } = 2;
+            public int OFFLINE_RETRY_MINUTES { get; set; } = 30;
             public int BATCH_SIZE { get; set; } = 5;
             public int MAX_PARALLEL { get; set; } = 5;
         }

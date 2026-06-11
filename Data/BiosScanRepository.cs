@@ -61,7 +61,10 @@ namespace BiosVersionBot.Data
         private string FullHistoryTable => $"[{_schema}].[OHD_CAMPAIGN_ITEM_HISTORY]";
         private string FullItemsView => $"[{_schema}].[v_OHD_CAMPAIGN_ITEMS_FULL]";
 
-        public async Task<List<BiosScanTarget>> GetTargetsAsync(int periodHours, CancellationToken ct)
+        public async Task<List<BiosScanTarget>> GetTargetsAsync(
+            int periodHours,
+            int offlineRetryMinutes,
+            CancellationToken ct)
         {
             string sql = $@"
 WITH q AS (
@@ -77,9 +80,23 @@ WITH q AS (
         AND t.IS_ACTIVE = 1
         AND NULLIF(LTRIM(RTRIM(t.[{_colComputer}])), '') IS NOT NULL
         AND t.[{_colDescription}] = @targetDescription
-        AND (
-            t.[{_colLastScan}] IS NULL
-            OR t.[{_colLastScan}] < DATEADD(HOUR, -@periodHours, GETDATE())
+        AND
+        (
+            (
+                t.[{_colResult}] = @offlineResult
+                AND (
+                    t.UPDATED_AT IS NULL
+                    OR t.UPDATED_AT < DATEADD(MINUTE, -@offlineRetryMinutes, GETDATE())
+                )
+            )
+            OR
+            (
+                ISNULL(t.[{_colResult}], '') <> @offlineResult
+                AND (
+                    t.[{_colLastScan}] IS NULL
+                    OR t.[{_colLastScan}] < DATEADD(HOUR, -@periodHours, GETDATE())
+                )
+            )
         )
 )
 SELECT ComputerName
@@ -95,7 +112,9 @@ ORDER BY ComputerName;";
             using var cmd = new SqlCommand(sql, conn) { CommandTimeout = _commandTimeoutSeconds };
             cmd.Parameters.AddWithValue("@campaignId", _campaignId);
             cmd.Parameters.AddWithValue("@targetDescription", _targetDescriptionValue);
+            cmd.Parameters.AddWithValue("@offlineResult", _offlineResultValue);
             cmd.Parameters.AddWithValue("@periodHours", periodHours);
+            cmd.Parameters.AddWithValue("@offlineRetryMinutes", offlineRetryMinutes);
 
             using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))
@@ -188,11 +207,9 @@ WHERE
 
                     try
                     {
+                        bool isOffline = string.Equals(u.ResultValue, _offlineResultValue, StringComparison.OrdinalIgnoreCase);
+
                         var newState = u.MarkDone ? _doneDescriptionValue : _targetDescriptionValue;
-                        var eventType = u.MarkDone ? "STATE_CHANGED" : "SCAN_FAILED";
-                        var comment = u.MarkDone
-                            ? "Automatyczny odczyt wersji BIOS przez BiosVersionBot."
-                            : $"Automatyczna próba odczytu wersji BIOS przez BiosVersionBot zakończona wynikiem: {u.ResultValue}.";
 
                         string sql = $@"
 DECLARE @ItemId INT;
@@ -222,14 +239,24 @@ BEGIN
         [{_colResult}] = @NewResult,
         [{_colOperator}] = @Operator,
         UPDATED_AT = GETDATE(),
-        [{_colLastScan}] = @LastScan,
-        CLOSED_AT = CASE WHEN @NewState = @DoneState THEN GETDATE() ELSE CLOSED_AT END
+
+        -- OFFLINE nie ustawia LAST_SCAN, żeby nie blokować kolejnej próby na PERIOD godzin.
+        [{_colLastScan}] = CASE
+            WHEN @IsOffline = 1 THEN [{_colLastScan}]
+            ELSE @LastScan
+        END,
+
+        CLOSED_AT = CASE
+            WHEN @NewState = @DoneState THEN GETDATE()
+            ELSE CLOSED_AT
+        END
     WHERE ITEM_ID = @ItemId
       AND [{_colDescription}] = @TargetState;
 
     SET @RowsAffected = @@ROWCOUNT;
 
-    IF @RowsAffected > 0
+    -- Historia tylko przy faktycznej zmianie stanu na Zrobione.
+    IF @RowsAffected > 0 AND @OldState <> @NewState AND @NewState = @DoneState
     BEGIN
         INSERT INTO {FullHistoryTable} (
             ITEM_ID, EVENT_TYPE, OLD_STATE, NEW_STATE, OLD_RESULT, NEW_RESULT,
@@ -241,7 +268,7 @@ BEGIN
         )
         SELECT
             @ItemId,
-            @EventType,
+            'STATE_CHANGED',
             @OldState,
             @NewState,
             @OldResult,
@@ -250,7 +277,7 @@ BEGIN
             @Operator,
             @Operator,
             GETDATE(),
-            @Comment,
+            N'Automatyczny odczyt wersji BIOS przez BiosVersionBot.',
             v.COMPUTER_NAME,
             v.CURRENT_SAP_COMPANY_CODE,
             v.CURRENT_SAP_SAT,
@@ -278,8 +305,7 @@ SELECT @RowsAffected;";
                         cmd.Parameters.AddWithValue("@LastScan", u.ScanTime);
                         cmd.Parameters.AddWithValue("@DoneState", _doneDescriptionValue);
                         cmd.Parameters.AddWithValue("@TargetState", _targetDescriptionValue);
-                        cmd.Parameters.AddWithValue("@EventType", eventType);
-                        cmd.Parameters.AddWithValue("@Comment", comment);
+                        cmd.Parameters.Add("@IsOffline", SqlDbType.Bit).Value = isOffline;
 
                         var obj = await cmd.ExecuteScalarAsync(ct);
                         int rows = Convert.ToInt32(obj);
@@ -301,9 +327,17 @@ SELECT @RowsAffected;";
             catch (Exception ex)
             {
                 await tx.RollbackAsync(ct);
+
                 foreach (var u in updates)
                     failed.Add(new FailedItem(u.ComputerName, ex.Message));
-                return new BatchUpdateResult(0, 0, failed.Count, Array.Empty<BiosScanUpdate>(), Array.Empty<string>(), failed);
+
+                return new BatchUpdateResult(
+                    0,
+                    0,
+                    failed.Count,
+                    Array.Empty<BiosScanUpdate>(),
+                    Array.Empty<string>(),
+                    failed);
             }
         }
     }
